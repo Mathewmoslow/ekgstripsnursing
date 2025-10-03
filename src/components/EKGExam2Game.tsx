@@ -54,7 +54,7 @@ const STRIP_WIDTH = PX_PER_SEC * STRIP_SECONDS;
 const rand = (min: number, max: number) => Math.random() * (max - min) + min;
 
 function Grid({ w = STRIP_WIDTH, h = 180 }: { w?: number; h?: number }) {
-  const lines: JSX.Element[] = [];
+  const lines: React.ReactElement[] = [];
   const small = SMALL_BOX;
   for (let x = 0; x <= w; x += small) {
     const thick = x % (small * 5) === 0;
