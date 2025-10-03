@@ -1,11 +1,12 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { motion } from "framer-motion";
+import { cn } from "@/lib/utils";
 import { Shuffle, Clock, BookOpenCheck, BarChart3, Play, RotateCcw } from "lucide-react";
 
 type StripKind =
@@ -52,6 +53,22 @@ const STRIP_SECONDS = 6;
 const STRIP_WIDTH = PX_PER_SEC * STRIP_SECONDS;
 
 const rand = (min: number, max: number) => Math.random() * (max - min) + min;
+
+const BPM_MAP: Record<StripKind, number> = {
+  sinus: 75,
+  sinus_brady: 48,
+  sinus_tachy: 120,
+  aflutter: 150,
+  afib: 110,
+  sinus_pac: 78,
+  psvt: 180,
+  junctional: 55,
+  firstdeg: 75,
+  stemi_inferior: 90,
+  nstemi: 85,
+};
+
+const getBpmForKind = (kind: StripKind) => BPM_MAP[kind] ?? 80;
 
 function Grid({ w = STRIP_WIDTH, h = 180 }: { w?: number; h?: number }) {
   const lines: React.ReactElement[] = [];
@@ -647,18 +664,24 @@ function QuestionCard({
         )}
         <div className="mt-4 grid gap-2 md:grid-cols-2">
           {question.options.map((option, optionIndex) => {
-            const variant = answered == null
-              ? "outline"
+            const state = answered == null
+              ? "idle"
               : optionIndex === question.answer
-              ? "default"
+              ? "correct"
               : optionIndex === answered
-              ? "destructive"
-              : "outline";
+              ? "wrong"
+              : "other";
             return (
               <Button
                 key={optionIndex}
-                variant={variant}
-                className="justify-start"
+                variant="outline"
+                className={cn(
+                  "justify-start transition-colors",
+                  state === "idle" && "bg-background",
+                  state === "correct" && "border-emerald-400 bg-emerald-500 text-white hover:bg-emerald-500/90",
+                  state === "wrong" && "border-rose-400 bg-rose-500 text-white hover:bg-rose-500/90",
+                  state === "other" && "opacity-75"
+                )}
                 onClick={() => onPick(optionIndex)}
                 disabled={answered != null}
               >
@@ -719,6 +742,58 @@ export default function EKGExam2Game() {
 
   const [timeLeft, setTimeLeft] = useState(TIMED_SECONDS);
 
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastFeedbackRef = useRef<{ index: number; answered: number | null }>({ index: -1, answered: null });
+
+  const ensureAudioContext = useCallback(() => {
+    if (typeof window === "undefined") return null;
+    const globalWindow = window as typeof window & { webkitAudioContext?: typeof AudioContext };
+    const AudioCtor = globalWindow.AudioContext ?? globalWindow.webkitAudioContext;
+    if (!AudioCtor) return null;
+    let ctx = audioContextRef.current;
+    if (!ctx) {
+      ctx = new AudioCtor();
+      audioContextRef.current = ctx;
+    }
+    if (ctx.state === "suspended") {
+      void ctx.resume();
+    }
+    return ctx;
+  }, []);
+
+  const playFeedback = useCallback(
+    (kind: StripKind, outcome: "correct" | "wrong") => {
+      const ctx = ensureAudioContext();
+      if (!ctx) return;
+
+      const bpm = getBpmForKind(kind);
+      const interval = Math.max(0.2, 60 / bpm);
+      const start = ctx.currentTime + 0.05;
+      const baseFreq = outcome === "correct" ? 660 : 240;
+      const pulses = outcome === "correct" ? 2 : 3;
+
+      for (let i = 0; i < pulses; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const freq = outcome === "correct" ? baseFreq * (i === 0 ? 1 : 1.08) : baseFreq * (1 - i * 0.12);
+        const onset = start + i * interval;
+
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, onset);
+
+        gain.gain.setValueAtTime(0, onset);
+        gain.gain.linearRampToValueAtTime(0.35, onset + 0.03);
+        gain.gain.linearRampToValueAtTime(0, onset + 0.25);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(onset);
+        osc.stop(onset + 0.3);
+      }
+    },
+    [ensureAudioContext]
+  );
   useEffect(() => {
     if (mode !== "timed") return;
     setTimeLeft(TIMED_SECONDS);
@@ -727,6 +802,25 @@ export default function EKGExam2Game() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [mode]);
+
+  useEffect(() => {
+    if (answered == null) return;
+    const last = lastFeedbackRef.current;
+    if (last.index === index && last.answered === answered) return;
+    lastFeedbackRef.current = { index, answered };
+    const outcome = answered === question.answer ? "correct" : "wrong";
+    playFeedback(question.stripKind, outcome);
+  }, [answered, index, playFeedback, question.answer, question.stripKind]);
+
+  useEffect(() => {
+    return () => {
+      const ctx = audioContextRef.current;
+      if (ctx) {
+        ctx.close().catch(() => undefined);
+        audioContextRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (mode !== "timed") return;
